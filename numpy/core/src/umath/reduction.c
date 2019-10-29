@@ -7,15 +7,13 @@
  * See LICENSE.txt for the license.
  */
 #define _UMATHMODULE
+#define _MULTIARRAYMODULE
 #define NPY_NO_DEPRECATED_API NPY_API_VERSION
 
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
 #include "npy_config.h"
-#define PY_ARRAY_UNIQUE_SYMBOL _npy_umathmodule_ARRAY_API
-#define NO_IMPORT_ARRAY
-
 #include <numpy/arrayobject.h>
 
 #include "npy_config.h"
@@ -38,7 +36,7 @@
  * If 'dtype' isn't NULL, this function steals its reference.
  */
 static PyArrayObject *
-allocate_reduce_result(PyArrayObject *arr, npy_bool *axis_flags,
+allocate_reduce_result(PyArrayObject *arr, const npy_bool *axis_flags,
                         PyArray_Descr *dtype, int subok)
 {
     npy_intp strides[NPY_MAXDIMS], stride;
@@ -56,7 +54,9 @@ allocate_reduce_result(PyArrayObject *arr, npy_bool *axis_flags,
 
     /* Build the new strides and shape */
     stride = dtype->elsize;
-    memcpy(shape, arr_shape, ndim * sizeof(shape[0]));
+    if (ndim) {
+        memcpy(shape, arr_shape, ndim * sizeof(shape[0]));
+    }
     for (idim = ndim-1; idim >= 0; --idim) {
         npy_intp i_perm = strideperm[idim].perm;
         if (axis_flags[i_perm]) {
@@ -84,7 +84,7 @@ allocate_reduce_result(PyArrayObject *arr, npy_bool *axis_flags,
  * The return value is a view into 'out'.
  */
 static PyArrayObject *
-conform_reduce_result(int ndim, npy_bool *axis_flags,
+conform_reduce_result(int ndim, const npy_bool *axis_flags,
                       PyArrayObject *out, int keepdims, const char *funcname,
                       int need_copy)
 {
@@ -155,13 +155,13 @@ conform_reduce_result(int ndim, npy_bool *axis_flags,
     dtype = PyArray_DESCR(out);
     Py_INCREF(dtype);
 
-    ret = (PyArrayObject_fields *)PyArray_NewFromDescr(&PyArray_Type,
-                               dtype,
-                               ndim, shape,
-                               strides,
-                               PyArray_DATA(out),
-                               PyArray_FLAGS(out),
-                               NULL);
+    /* TODO: use PyArray_NewFromDescrAndBase here once multiarray and umath
+     *       are merged
+     */
+    ret = (PyArrayObject_fields *)PyArray_NewFromDescr(
+            &PyArray_Type, dtype,
+            ndim, shape, strides, PyArray_DATA(out),
+            PyArray_FLAGS(out), NULL);
     if (ret == NULL) {
         return NULL;
     }
@@ -188,7 +188,6 @@ conform_reduce_result(int ndim, npy_bool *axis_flags,
             return NULL;
         }
 
-        Py_INCREF(ret);
         if (PyArray_SetWritebackIfCopyBase(ret_copy, (PyArrayObject *)ret) < 0) {
             Py_DECREF(ret);
             Py_DECREF(ret_copy);
@@ -249,29 +248,20 @@ PyArray_CreateReduceResult(PyArrayObject *operand, PyArrayObject *out,
 }
 
 /*
- * Checks that there are only zero or one dimensions selected in 'axis_flags',
- * and raises an error about a non-reorderable reduction if not.
+ * Count the number of dimensions selected in 'axis_flags'
  */
 static int
-check_nonreorderable_axes(int ndim, npy_bool *axis_flags, const char *funcname)
+count_axes(int ndim, const npy_bool *axis_flags)
 {
-    int idim, single_axis = 0;
+    int idim;
+    int naxes = 0;
+
     for (idim = 0; idim < ndim; ++idim) {
         if (axis_flags[idim]) {
-            if (single_axis) {
-                PyErr_Format(PyExc_ValueError,
-                        "reduction operation '%s' is not reorderable, "
-                        "so only one axis may be specified",
-                        funcname);
-                return -1;
-            }
-            else {
-                single_axis = 1;
-            }
+            naxes++;
         }
     }
-
-    return 0;
+    return naxes;
 }
 
 /*
@@ -296,11 +286,6 @@ check_nonreorderable_axes(int ndim, npy_bool *axis_flags, const char *funcname)
  * operand : The array being reduced.
  * axis_flags : An array of boolean flags, one for each axis of 'operand'.
  *              When a flag is True, it indicates to reduce along that axis.
- * reorderable : If True, the reduction being done is reorderable, which
- *               means specifying multiple axes of reduction at once is ok,
- *               and the reduction code may calculate the reduction in an
- *               arbitrary order. The calculation may be reordered because
- *               of cache behavior or multithreading requirements.
  * out_skip_first_count : This gets populated with the number of first-visit
  *                        elements that should be skipped during the
  *                        iteration loop.
@@ -314,7 +299,7 @@ check_nonreorderable_axes(int ndim, npy_bool *axis_flags, const char *funcname)
 NPY_NO_EXPORT PyArrayObject *
 PyArray_InitializeReduceResult(
                     PyArrayObject *result, PyArrayObject *operand,
-                    npy_bool *axis_flags, int reorderable,
+                    const npy_bool *axis_flags,
                     npy_intp *out_skip_first_count, const char *funcname)
 {
     npy_intp *strides, *shape, shape_orig[NPY_MAXDIMS];
@@ -325,15 +310,6 @@ PyArray_InitializeReduceResult(
 
     /* Default to no skipping first-visit elements in the iteration */
     *out_skip_first_count = 0;
-
-    /*
-     * If this reduction is non-reorderable, make sure there are
-     * only 0 or 1 axes in axis_flags.
-     */
-    if (!reorderable && check_nonreorderable_axes(ndim,
-                                    axis_flags, funcname) < 0) {
-        return NULL;
-    }
 
     /* Take a view into 'operand' which we can modify. */
     op_view = (PyArrayObject *)PyArray_View(operand, NULL, &PyArray_Type);
@@ -351,7 +327,9 @@ PyArray_InitializeReduceResult(
      */
     shape = PyArray_SHAPE(op_view);
     nreduce_axes = 0;
-    memcpy(shape_orig, shape, ndim * sizeof(npy_intp));
+    if (ndim) {
+        memcpy(shape_orig, shape, ndim * sizeof(npy_intp));
+    }
     for (idim = 0; idim < ndim; ++idim) {
         if (axis_flags[idim]) {
             if (shape[idim] == 0) {
@@ -469,15 +447,24 @@ PyUFunc_ReduceWrapper(PyArrayObject *operand, PyArrayObject *out,
 
     /* Iterator parameters */
     NpyIter *iter = NULL;
-    PyArrayObject *op[2];
-    PyArray_Descr *op_dtypes[2];
-    npy_uint32 flags, op_flags[2];
+    PyArrayObject *op[3];
+    PyArray_Descr *op_dtypes[3];
+    npy_uint32 flags, op_flags[3];
 
-    /* Validate that the parameters for future expansion are NULL */
-    if (wheremask != NULL) {
-        PyErr_SetString(PyExc_RuntimeError,
-                "Reduce operations in NumPy do not yet support "
-                "a where mask");
+    /* More than one axis means multiple orders are possible */
+    if (!reorderable && count_axes(PyArray_NDIM(operand), axis_flags) > 1) {
+        PyErr_Format(PyExc_ValueError,
+                     "reduction operation '%s' is not reorderable, "
+                     "so at most one axis may be specified",
+                     funcname);
+        return NULL;
+    }
+    /* Can only use where with an initial ( from identity or argument) */
+    if (wheremask != NULL && identity == Py_None) {
+        PyErr_Format(PyExc_ValueError,
+                     "reduction operation '%s' does not have an identity, "
+                     "so to use a where mask one has to specify 'initial'",
+                     funcname);
         return NULL;
     }
 
@@ -501,15 +488,6 @@ PyUFunc_ReduceWrapper(PyArrayObject *operand, PyArrayObject *out,
      * otherwise copy the initial values and get a view to the rest.
      */
     if (identity != Py_None) {
-        /*
-         * If this reduction is non-reorderable, make sure there are
-         * only 0 or 1 axes in axis_flags.
-         */
-        if (!reorderable && check_nonreorderable_axes(PyArray_NDIM(operand),
-                                        axis_flags, funcname) < 0) {
-            goto fail;
-        }
-
         if (PyArray_FillWithScalar(result, identity) < 0) {
             goto fail;
         }
@@ -517,9 +495,8 @@ PyUFunc_ReduceWrapper(PyArrayObject *operand, PyArrayObject *out,
         Py_INCREF(op_view);
     }
     else {
-        op_view = PyArray_InitializeReduceResult(result, operand,
-                            axis_flags, reorderable,
-                            &skip_first_count, funcname);
+        op_view = PyArray_InitializeReduceResult(
+            result, operand, axis_flags, &skip_first_count, funcname);
         if (op_view == NULL) {
             goto fail;
         }
@@ -549,8 +526,18 @@ PyUFunc_ReduceWrapper(PyArrayObject *operand, PyArrayObject *out,
                   NPY_ITER_NO_SUBTYPE;
     op_flags[1] = NPY_ITER_READONLY |
                   NPY_ITER_ALIGNED;
+    if (wheremask != NULL) {
+        op[2] = wheremask;
+        /* wheremask is guaranteed to be NPY_BOOL, so borrow its reference */
+        op_dtypes[2] = PyArray_DESCR(wheremask);
+        assert(op_dtypes[2]->type_num == NPY_BOOL);
+        if (op_dtypes[2] == NULL) {
+            goto fail;
+        }
+        op_flags[2] = NPY_ITER_READONLY;
+    }
 
-    iter = NpyIter_AdvancedNew(2, op, flags,
+    iter = NpyIter_AdvancedNew(wheremask == NULL ? 2 : 3, op, flags,
                                NPY_KEEPORDER, casting,
                                op_flags,
                                op_dtypes,
@@ -560,7 +547,7 @@ PyUFunc_ReduceWrapper(PyArrayObject *operand, PyArrayObject *out,
     }
 
     /* Start with the floating-point exception flags cleared */
-    PyUFunc_clearfperr();
+    npy_clear_floatstatus_barrier((char*)&iter);
 
     if (NpyIter_GetIterSize(iter) != 0) {
         NpyIter_IterNextFunc *iternext;
@@ -593,7 +580,7 @@ PyUFunc_ReduceWrapper(PyArrayObject *operand, PyArrayObject *out,
             goto fail;
         }
     }
-    
+
     /* Check whether any errors occurred during the loop */
     if (PyErr_Occurred() ||
             _check_ufunc_fperr(errormask, NULL, "reduce") < 0) {

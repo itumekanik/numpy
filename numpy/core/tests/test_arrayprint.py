@@ -2,11 +2,14 @@
 from __future__ import division, absolute_import, print_function
 
 import sys
+import gc
+import pytest
 
 import numpy as np
 from numpy.testing import (
-     run_module_suite, assert_, assert_equal, assert_raises, assert_warns
-)
+    assert_, assert_equal, assert_raises, assert_warns, HAS_REFCOUNT,
+    assert_raises_regex,
+    )
 import textwrap
 
 class TestArrayRepr(object):
@@ -28,22 +31,107 @@ class TestArrayRepr(object):
             '     [3, 4]])')
 
         # two dimensional with flexible dtype
-        xstruct = np.ones((2,2), dtype=[('a', 'i4')]).view(sub)
+        xstruct = np.ones((2,2), dtype=[('a', '<i4')]).view(sub)
         assert_equal(repr(xstruct),
             "sub([[(1,), (1,)],\n"
             "     [(1,), (1,)]], dtype=[('a', '<i4')])"
         )
+
+    @pytest.mark.xfail(reason="See gh-10544")
+    def test_object_subclass(self):
+        class sub(np.ndarray):
+            def __new__(cls, inp):
+                obj = np.asarray(inp).view(cls)
+                return obj
+
+            def __getitem__(self, ind):
+                ret = super(sub, self).__getitem__(ind)
+                return sub(ret)
+
+        # test that object + subclass is OK:
+        x = sub([None, None])
+        assert_equal(repr(x), 'sub([None, None], dtype=object)')
+        assert_equal(str(x), '[None None]')
+
+        x = sub([None, sub([None, None])])
+        assert_equal(repr(x),
+            'sub([None, sub([None, None], dtype=object)], dtype=object)')
+        assert_equal(str(x), '[None sub([None, None], dtype=object)]')
+
+    def test_0d_object_subclass(self):
+        # make sure that subclasses which return 0ds instead
+        # of scalars don't cause infinite recursion in str
+        class sub(np.ndarray):
+            def __new__(cls, inp):
+                obj = np.asarray(inp).view(cls)
+                return obj
+
+            def __getitem__(self, ind):
+                ret = super(sub, self).__getitem__(ind)
+                return sub(ret)
+
+        x = sub(1)
+        assert_equal(repr(x), 'sub(1)')
+        assert_equal(str(x), '1')
+
+        x = sub([1, 1])
+        assert_equal(repr(x), 'sub([1, 1])')
+        assert_equal(str(x), '[1 1]')
+
+        # check it works properly with object arrays too
+        x = sub(None)
+        assert_equal(repr(x), 'sub(None, dtype=object)')
+        assert_equal(str(x), 'None')
+
+        # plus recursive object arrays (even depth > 1)
+        y = sub(None)
+        x[()] = y
+        y[()] = x
+        assert_equal(repr(x),
+            'sub(sub(sub(..., dtype=object), dtype=object), dtype=object)')
+        assert_equal(str(x), '...')
+        x[()] = 0  # resolve circular references for garbage collector
+
+        # nested 0d-subclass-object
+        x = sub(None)
+        x[()] = sub(None)
+        assert_equal(repr(x), 'sub(sub(None, dtype=object), dtype=object)')
+        assert_equal(str(x), 'None')
+
+        # gh-10663
+        class DuckCounter(np.ndarray):
+            def __getitem__(self, item):
+                result = super(DuckCounter, self).__getitem__(item)
+                if not isinstance(result, DuckCounter):
+                    result = result[...].view(DuckCounter)
+                return result
+
+            def to_string(self):
+                return {0: 'zero', 1: 'one', 2: 'two'}.get(self.item(), 'many')
+
+            def __str__(self):
+                if self.shape == ():
+                    return self.to_string()
+                else:
+                    fmt = {'all': lambda x: x.to_string()}
+                    return np.array2string(self, formatter=fmt)
+
+        dc = np.arange(5).view(DuckCounter)
+        assert_equal(str(dc), "[zero one two many many]")
+        assert_equal(str(dc[0]), "zero")
 
     def test_self_containing(self):
         arr0d = np.array(None)
         arr0d[()] = arr0d
         assert_equal(repr(arr0d),
             'array(array(..., dtype=object), dtype=object)')
+        arr0d[()] = 0  # resolve recursion for garbage collector
 
         arr1d = np.array([None, None])
         arr1d[1] = arr1d
         assert_equal(repr(arr1d),
             'array([None, array(..., dtype=object)], dtype=object)')
+        arr1d[1] = 0  # resolve recursion for garbage collector
 
         first = np.array(None)
         second = np.array(None)
@@ -51,6 +139,7 @@ class TestArrayRepr(object):
         second[()] = first
         assert_equal(repr(first),
             'array(array(array(..., dtype=object), dtype=object), dtype=object)')
+        first[()] = 0  # resolve circular references for garbage collector
 
     def test_containing_list(self):
         # printing square brackets directly would be ambiguuous
@@ -63,6 +152,12 @@ class TestArrayRepr(object):
     def test_void_scalar_recursion(self):
         # gh-9345
         repr(np.void(b'test'))  # RecursionError ?
+
+    def test_fieldless_structured(self):
+        # gh-10366
+        no_fields = np.dtype([])
+        arr_no_fields = np.empty(4, dtype=no_fields)
+        assert_equal(repr(arr_no_fields), 'array([(), (), (), ()], dtype=[])')
 
 
 class TestComplexArray(object):
@@ -120,6 +215,15 @@ class TestArray2String(object):
         assert_(np.array2string(a, max_line_width=4, legacy='1.13') == '[0 1\n 2]')
         assert_(np.array2string(a, max_line_width=4) == '[0\n 1\n 2]')
 
+    def test_unexpected_kwarg(self):
+        # ensure than an appropriate TypeError
+        # is raised when array2string receives
+        # an unexpected kwarg
+
+        with assert_raises_regex(TypeError, 'nonsense'):
+            np.array2string(np.array([1, 2, 3]),
+                            nonsense=None)
+
     def test_format_function(self):
         """Test custom format function for each element in array."""
         def _format_function(x):
@@ -158,11 +262,6 @@ class TestArray2String(object):
         assert_(np.array2string(s, formatter={'numpystr':lambda s: s*2}) ==
                 '[abcabc defdef]')
 
-        # check for backcompat that using FloatFormat works and emits warning
-        with assert_warns(DeprecationWarning):
-            fmt = np.core.arrayprint.FloatFormat(x, 9, 'maxprec', False)
-        assert_equal(np.array2string(x, formatter={'float_kind': fmt}),
-                     '[0. 1. 2.]')
 
     def test_structure_format(self):
         dt = np.dtype([('name', np.str_, 16), ('grades', np.float64, (2,))])
@@ -300,6 +399,19 @@ class TestArray2String(object):
             "[ 'xxxxx']"
         )
 
+    @pytest.mark.skipif(not HAS_REFCOUNT, reason="Python lacks refcounts")
+    def test_refcount(self):
+        # make sure we do not hold references to the array due to a recursive
+        # closure (gh-10620)
+        gc.disable()
+        a = np.arange(2)
+        r1 = sys.getrefcount(a)
+        np.array2string(a)
+        np.array2string(a)
+        r2 = sys.getrefcount(a)
+        gc.collect()
+        gc.enable()
+        assert_(r1 == r2)
 
 class TestPrintOptions(object):
     """Test getting and setting global print options."""
@@ -356,13 +468,14 @@ class TestPrintOptions(object):
 
     def test_0d_arrays(self):
         unicode = type(u'')
-        assert_equal(unicode(np.array(u'café', np.unicode_)), u'café')
+
+        assert_equal(unicode(np.array(u'café', '<U4')), u'café')
 
         if sys.version_info[0] >= 3:
-            assert_equal(repr(np.array('café', np.unicode_)),
+            assert_equal(repr(np.array('café', '<U4')),
                          "array('café', dtype='<U4')")
         else:
-            assert_equal(repr(np.array(u'café', np.unicode_)),
+            assert_equal(repr(np.array(u'café', '<U4')),
                          "array(u'caf\\xe9', dtype='<U4')")
         assert_equal(str(np.array('test', np.str_)), 'test')
 
@@ -387,6 +500,8 @@ class TestPrintOptions(object):
                                          np.array(1.), style=repr)
         # but not in legacy mode
         np.array2string(np.array(1.), style=repr, legacy='1.13')
+        # gh-10934 style was broken in legacy mode, check it works
+        np.array2string(np.array(1.), legacy='1.13')
 
     def test_float_spacing(self):
         x = np.array([1., 2., 3.])
@@ -427,21 +542,30 @@ class TestPrintOptions(object):
     def test_sign_spacing(self):
         a = np.arange(4.)
         b = np.array([1.234e9])
+        c = np.array([1.0 + 1.0j, 1.123456789 + 1.123456789j], dtype='c16')
 
         assert_equal(repr(a), 'array([0., 1., 2., 3.])')
         assert_equal(repr(np.array(1.)), 'array(1.)')
         assert_equal(repr(b), 'array([1.234e+09])')
         assert_equal(repr(np.array([0.])), 'array([0.])')
+        assert_equal(repr(c),
+            "array([1.        +1.j        , 1.12345679+1.12345679j])")
+        assert_equal(repr(np.array([0., -0.])), 'array([ 0., -0.])')
 
         np.set_printoptions(sign=' ')
         assert_equal(repr(a), 'array([ 0.,  1.,  2.,  3.])')
         assert_equal(repr(np.array(1.)), 'array( 1.)')
         assert_equal(repr(b), 'array([ 1.234e+09])')
+        assert_equal(repr(c),
+            "array([ 1.        +1.j        ,  1.12345679+1.12345679j])")
+        assert_equal(repr(np.array([0., -0.])), 'array([ 0., -0.])')
 
         np.set_printoptions(sign='+')
         assert_equal(repr(a), 'array([+0., +1., +2., +3.])')
         assert_equal(repr(np.array(1.)), 'array(+1.)')
         assert_equal(repr(b), 'array([+1.234e+09])')
+        assert_equal(repr(c),
+            "array([+1.        +1.j        , +1.12345679+1.12345679j])")
 
         np.set_printoptions(legacy='1.13')
         assert_equal(repr(a), 'array([ 0.,  1.,  2.,  3.])')
@@ -449,6 +573,10 @@ class TestPrintOptions(object):
         assert_equal(repr(-b), 'array([ -1.23400000e+09])')
         assert_equal(repr(np.array(1.)), 'array(1.0)')
         assert_equal(repr(np.array([0.])), 'array([ 0.])')
+        assert_equal(repr(c),
+            "array([ 1.00000000+1.j        ,  1.12345679+1.12345679j])")
+        # gh-10383
+        assert_equal(str(np.array([-1., 10])), "[ -1.  10.]")
 
         assert_raises(TypeError, np.set_printoptions, wrongarg=True)
 
@@ -458,7 +586,7 @@ class TestPrintOptions(object):
         repr(np.array([1e4, 0.1], dtype='f2'))
 
     def test_sign_spacing_structured(self):
-        a = np.ones(2, dtype='f,f')
+        a = np.ones(2, dtype='<f,<f')
         assert_equal(repr(a),
             "array([(1., 1.), (1., 1.)], dtype=[('f0', '<f4'), ('f1', '<f4')])")
         assert_equal(repr(a[0]), "(1., 1.)")
@@ -472,6 +600,7 @@ class TestPrintOptions(object):
                       0.0862072768214508, 0.39112753029631175],
                       dtype=np.float64)
         z = np.arange(6, dtype=np.float16)/10
+        c = np.array([1.0 + 1.0j, 1.123456789 + 1.123456789j], dtype='c16')
 
         # also make sure 1e23 is right (is between two fp numbers)
         w = np.array(['1e{}'.format(i) for i in range(25)], dtype=np.float64)
@@ -497,6 +626,8 @@ class TestPrintOptions(object):
             "       1.e+16, 1.e+17, 1.e+18, 1.e+19, 1.e+20, 1.e+21, 1.e+22, 1.e+23,\n"
             "       1.e+24])")
         assert_equal(repr(wp), "array([1.234e+001, 1.000e+002, 1.000e+123])")
+        assert_equal(repr(c),
+            "array([1.         +1.j         , 1.123456789+1.123456789j])")
 
         # maxprec mode, precision=8
         np.set_printoptions(floatmode='maxprec', precision=8)
@@ -511,6 +642,8 @@ class TestPrintOptions(object):
         assert_equal(repr(w[::5]),
             "array([1.e+00, 1.e+05, 1.e+10, 1.e+15, 1.e+20])")
         assert_equal(repr(wp), "array([1.234e+001, 1.000e+002, 1.000e+123])")
+        assert_equal(repr(c),
+            "array([1.        +1.j        , 1.12345679+1.12345679j])")
 
         # fixed mode, precision=4
         np.set_printoptions(floatmode='fixed', precision=4)
@@ -525,6 +658,8 @@ class TestPrintOptions(object):
             "array([1.0000e+00, 1.0000e+05, 1.0000e+10, 1.0000e+15, 1.0000e+20])")
         assert_equal(repr(wp), "array([1.2340e+001, 1.0000e+002, 1.0000e+123])")
         assert_equal(repr(np.zeros(3)), "array([0.0000, 0.0000, 0.0000])")
+        assert_equal(repr(c),
+            "array([1.0000+1.0000j, 1.1235+1.1235j])")
         # for larger precision, representation error becomes more apparent:
         np.set_printoptions(floatmode='fixed', precision=8)
         assert_equal(repr(z),
@@ -544,6 +679,8 @@ class TestPrintOptions(object):
         assert_equal(repr(w[::5]),
             "array([1.e+00, 1.e+05, 1.e+10, 1.e+15, 1.e+20])")
         assert_equal(repr(wp), "array([1.234e+001, 1.000e+002, 1.000e+123])")
+        assert_equal(repr(c),
+            "array([1.00000000+1.00000000j, 1.12345679+1.12345679j])")
 
     def test_legacy_mode_scalars(self):
         # in legacy mode, str of floats get truncated, and complex scalars
@@ -704,6 +841,10 @@ class TestPrintOptions(object):
                     [[ 0.]]]])""")
         )
 
+    def test_bad_args(self):
+        assert_raises(ValueError, np.set_printoptions, threshold=float('nan'))
+        assert_raises(TypeError, np.set_printoptions, threshold='1')
+        assert_raises(TypeError, np.set_printoptions, threshold=b'1')
 
 def test_unicode_object_array():
     import sys
@@ -715,5 +856,33 @@ def test_unicode_object_array():
     assert_equal(repr(x), expected)
 
 
-if __name__ == "__main__":
-    run_module_suite()
+class TestContextManager(object):
+    def test_ctx_mgr(self):
+        # test that context manager actuall works
+        with np.printoptions(precision=2):
+            s = str(np.array([2.0]) / 3)
+        assert_equal(s, '[0.67]')
+
+    def test_ctx_mgr_restores(self):
+        # test that print options are actually restrored
+        opts = np.get_printoptions()
+        with np.printoptions(precision=opts['precision'] - 1,
+                             linewidth=opts['linewidth'] - 4):
+            pass
+        assert_equal(np.get_printoptions(), opts)
+
+    def test_ctx_mgr_exceptions(self):
+        # test that print options are restored even if an exception is raised
+        opts = np.get_printoptions()
+        try:
+            with np.printoptions(precision=2, linewidth=11):
+                raise ValueError
+        except ValueError:
+            pass
+        assert_equal(np.get_printoptions(), opts)
+
+    def test_ctx_mgr_as_smth(self):
+        opts = {"precision": 2}
+        with np.printoptions(**opts) as ctx:
+            saved_opts = ctx.copy()
+        assert_equal({k: saved_opts[k] for k in opts}, opts)
