@@ -5,7 +5,7 @@ from libc.stdint cimport uint32_t, uint64_t, int32_t, int64_t
 import numpy as np
 cimport numpy as np
 
-from ._bit_generator cimport bitgen_t
+from numpy.random cimport bitgen_t
 
 cdef double POISSON_LAM_MAX
 cdef double LEGACY_POISSON_LAM_MAX
@@ -39,7 +39,7 @@ cdef extern from "include/aligned_malloc.h":
     cdef void *PyArray_calloc_aligned(size_t n, size_t s)
     cdef void PyArray_free_aligned(void *p)
 
-ctypedef double (*random_double_fill)(bitgen_t *state, np.npy_intp count, double* out) nogil
+ctypedef void (*random_double_fill)(bitgen_t *state, np.npy_intp count, double* out) nogil
 ctypedef double (*random_double_0)(void *state) nogil
 ctypedef double (*random_double_1)(void *state, double a) nogil
 ctypedef double (*random_double_2)(void *state, double a, double b) nogil
@@ -76,6 +76,8 @@ cdef object float_fill_from_double(void *func, bitgen_t *state, object size, obj
 cdef object wrap_int(object val, object bits)
 
 cdef np.ndarray int_to_array(object value, object name, object bits, object uint_size)
+
+cdef validate_output_shape(iter_shape, np.ndarray output)
 
 cdef object cont(void *func, void *state, object size, object lock, int narg,
                  object a, object a_name, constraint_type a_constraint,

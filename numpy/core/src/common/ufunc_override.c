@@ -36,6 +36,9 @@ PyUFuncOverride_GetNonDefaultArrayUfunc(PyObject *obj)
      */
     cls_array_ufunc = PyArray_LookupSpecial(obj, "__array_ufunc__");
     if (cls_array_ufunc == NULL) {
+        if (PyErr_Occurred()) {
+            PyErr_Clear(); /* TODO[gh-14801]: propagate crashes during attribute access? */
+        }
         return NULL;
     }
     /* Ignore if the same as ndarray.__array_ufunc__ */
@@ -91,8 +94,11 @@ PyUFuncOverride_GetOutObjects(PyObject *kwds, PyObject **out_kwd_obj, PyObject *
         return -1;
     }
     /* borrowed reference */
-    *out_kwd_obj = PyDict_GetItemString(kwds, "out");
+    *out_kwd_obj = _PyDict_GetItemStringWithError(kwds, "out");
     if (*out_kwd_obj == NULL) {
+        if (PyErr_Occurred()) {
+            return -1;
+        }
         Py_INCREF(Py_None);
         *out_kwd_obj = Py_None;
         return 0;

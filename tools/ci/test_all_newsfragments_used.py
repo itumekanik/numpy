@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import sys
 import toml
@@ -12,5 +12,5 @@ fragments.remove("template.rst")
 
 if fragments:
     print("The following files were not found by towncrier:")
-    print("    " + "    \n".join(fragments))
+    print("    " + "\n    ".join(fragments))
     sys.exit(1)

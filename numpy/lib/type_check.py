@@ -1,7 +1,6 @@
 """Automatically adapted for numpy Sep 19, 2005 by convertcode.py
 
 """
-from __future__ import division, absolute_import, print_function
 import functools
 import warnings
 
@@ -68,16 +67,14 @@ def mintypecode(typechars, typeset='GDFgdf', default='d'):
     'G'
 
     """
-    typecodes = [(isinstance(t, str) and t) or asarray(t).dtype.char
-                 for t in typechars]
-    intersection = [t for t in typecodes if t in typeset]
+    typecodes = ((isinstance(t, str) and t) or asarray(t).dtype.char
+                 for t in typechars)
+    intersection = set(t for t in typecodes if t in typeset)
     if not intersection:
         return default
     if 'F' in intersection and 'd' in intersection:
         return 'D'
-    l = [(_typecodes_by_elsize.index(t), t) for t in intersection]
-    l.sort()
-    return l[0][1]
+    return min(intersection, key=_typecodes_by_elsize.index)
 
 
 def _asfarray_dispatcher(a, dtype=None):
@@ -265,6 +262,10 @@ def isreal(x):
     out : ndarray, bool
         Boolean array of same shape as `x`.
 
+    Notes
+    -----
+    `isreal` may behave unexpectedly for string or object arrays (see examples)
+
     See Also
     --------
     iscomplex
@@ -272,8 +273,28 @@ def isreal(x):
 
     Examples
     --------
-    >>> np.isreal([1+1j, 1+0j, 4.5, 3, 2, 2j])
+    >>> a = np.array([1+1j, 1+0j, 4.5, 3, 2, 2j], dtype=complex)
+    >>> np.isreal(a)
     array([False,  True,  True,  True,  True, False])
+    
+    The function does not work on string arrays.
+
+    >>> a = np.array([2j, "a"], dtype="U")
+    >>> np.isreal(a)  # Warns about non-elementwise comparison
+    False
+    
+    Returns True for all elements in input array of ``dtype=object`` even if
+    any of the elements is complex.
+
+    >>> a = np.array([1, "2", 3+4j], dtype=object)
+    >>> np.isreal(a)
+    array([ True,  True,  True])
+    
+    isreal should not be used with object arrays
+    
+    >>> a = np.array([1+2j, 2+1j], dtype=object)
+    >>> np.isreal(a)
+    array([ True,  True])
 
     """
     return imag(x) == 0
@@ -342,6 +363,19 @@ def isrealobj(x):
     See Also
     --------
     iscomplexobj, isreal
+
+    Notes
+    -----
+    The function is only meant for arrays with numerical values but it
+    accepts all other objects. Since it assumes array input, the return
+    value of other objects may be True.
+
+    >>> np.isrealobj('A string')
+    True
+    >>> np.isrealobj(False)
+    True
+    >>> np.isrealobj(None)
+    True
 
     Examples
     --------
@@ -495,7 +529,8 @@ def _real_if_close_dispatcher(a, tol=None):
 @array_function_dispatch(_real_if_close_dispatcher)
 def real_if_close(a, tol=100):
     """
-    If complex input returns a real array if complex parts are close to zero.
+    If input is complex with all imaginary parts close to zero, return 
+    real parts.
 
     "Close to zero" is defined as `tol` * (machine epsilon of the type for
     `a`).
@@ -530,10 +565,10 @@ def real_if_close(a, tol=100):
     >>> np.finfo(float).eps
     2.2204460492503131e-16 # may vary
 
-    >>> np.real_if_close([2.1 + 4e-14j], tol=1000)
-    array([2.1])
-    >>> np.real_if_close([2.1 + 4e-13j], tol=1000)
-    array([2.1+4.e-13j])
+    >>> np.real_if_close([2.1 + 4e-14j, 5.2 + 3e-15j], tol=1000)
+    array([2.1, 5.2])
+    >>> np.real_if_close([2.1 + 4e-13j, 5.2 + 3e-15j], tol=1000)
+    array([2.1+4.e-13j, 5.2 + 3e-15j])
 
     """
     a = asanyarray(a)

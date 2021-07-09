@@ -1,16 +1,11 @@
 from cpython.pycapsule cimport PyCapsule_New
 
-try:
-    from threading import Lock
-except ImportError:
-    from dummy_threading import Lock
-
 import numpy as np
 cimport numpy as np
 
 from libc.stdint cimport uint32_t, uint64_t
 from ._common cimport uint64_to_double, int_to_array, wrap_int
-from ._bit_generator cimport BitGenerator
+from numpy.random cimport BitGenerator
 
 __all__ = ['Philox']
 

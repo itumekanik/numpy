@@ -1,5 +1,3 @@
-from __future__ import division, absolute_import, print_function
-
 import warnings
 import pytest
 
@@ -39,22 +37,36 @@ def test_repr_roundtrip():
     assert_equal(np.longdouble(repr(o)), o, "repr was %s" % repr(o))
 
 
-def test_unicode():
-    np.longdouble(u"1.2")
-
-
-def test_string():
-    np.longdouble("1.2")
-
-
-def test_bytes():
-    np.longdouble(b"1.2")
-
-
 @pytest.mark.skipif(string_to_longdouble_inaccurate, reason="Need strtold_l")
 def test_repr_roundtrip_bytes():
     o = 1 + LD_INFO.eps
     assert_equal(np.longdouble(repr(o).encode("ascii")), o)
+
+
+@pytest.mark.skipif(string_to_longdouble_inaccurate, reason="Need strtold_l")
+@pytest.mark.parametrize("strtype", (np.str_, np.bytes_, str, bytes))
+def test_array_and_stringlike_roundtrip(strtype):
+    """
+    Test that string representations of long-double roundtrip both
+    for array casting and scalar coercion, see also gh-15608.
+    """
+    o = 1 + LD_INFO.eps
+
+    if strtype in (np.bytes_, bytes):
+        o_str = strtype(repr(o).encode("ascii"))
+    else:
+        o_str = strtype(repr(o))
+
+    # Test that `o` is correctly coerced from the string-like
+    assert o == np.longdouble(o_str)
+
+    # Test that arrays also roundtrip correctly:
+    o_strarr = np.asarray([o] * 3, dtype=strtype)
+    assert (o == o_strarr.astype(np.longdouble)).all()
+
+    # And array coercion and casting to string give the same as scalar repr:
+    assert (o_strarr == o_str).all()
+    assert (np.asarray([o] * 3).astype(strtype) == o_str).all()
 
 
 def test_bogus_string():
@@ -69,6 +81,38 @@ def test_fromstring():
     a = np.array([o]*5)
     assert_equal(np.fromstring(s, sep=" ", dtype=np.longdouble), a,
                  err_msg="reading '%s'" % s)
+
+
+def test_fromstring_complex():
+    for ctype in ["complex", "cdouble", "cfloat"]:
+        # Check spacing between separator
+        assert_equal(np.fromstring("1, 2 ,  3  ,4", sep=",", dtype=ctype),
+                     np.array([1., 2., 3., 4.]))
+        # Real component not specified
+        assert_equal(np.fromstring("1j, -2j,  3j, 4e1j", sep=",", dtype=ctype),
+                     np.array([1.j, -2.j, 3.j, 40.j]))
+        # Both components specified
+        assert_equal(np.fromstring("1+1j,2-2j, -3+3j,  -4e1+4j", sep=",", dtype=ctype),
+                     np.array([1. + 1.j, 2. - 2.j, - 3. + 3.j, - 40. + 4j]))
+        # Spaces at wrong places
+        with assert_warns(DeprecationWarning):
+            assert_equal(np.fromstring("1+2 j,3", dtype=ctype, sep=","),
+                         np.array([1.]))
+        with assert_warns(DeprecationWarning):
+            assert_equal(np.fromstring("1+ 2j,3", dtype=ctype, sep=","),
+                         np.array([1.]))
+        with assert_warns(DeprecationWarning):
+            assert_equal(np.fromstring("1 +2j,3", dtype=ctype, sep=","),
+                         np.array([1.]))
+        with assert_warns(DeprecationWarning):
+            assert_equal(np.fromstring("1+j", dtype=ctype, sep=","),
+                         np.array([1.]))
+        with assert_warns(DeprecationWarning):
+            assert_equal(np.fromstring("1+", dtype=ctype, sep=","),
+                         np.array([1.]))
+        with assert_warns(DeprecationWarning):
+            assert_equal(np.fromstring("1j+1", dtype=ctype, sep=","),
+                         np.array([1j]))
 
 
 def test_fromstring_bogus():
@@ -89,7 +133,7 @@ def test_fromstring_missing():
                      np.array([1]))
 
 
-class TestFileBased(object):
+class TestFileBased:
 
     ldbl = 1 + LD_INFO.eps
     tgt = np.array([ldbl]*5)
@@ -103,6 +147,88 @@ class TestFileBased(object):
             with assert_warns(DeprecationWarning):
                 res = np.fromfile(path, dtype=float, sep=" ")
         assert_equal(res, np.array([1., 2., 3.]))
+
+    def test_fromfile_complex(self):
+        for ctype in ["complex", "cdouble", "cfloat"]:
+            # Check spacing between separator and only real component specified
+            with temppath() as path:
+                with open(path, 'wt') as f:
+                    f.write("1, 2 ,  3  ,4\n")
+
+                res = np.fromfile(path, dtype=ctype, sep=",")
+            assert_equal(res, np.array([1., 2., 3., 4.]))
+
+            # Real component not specified
+            with temppath() as path:
+                with open(path, 'wt') as f:
+                    f.write("1j, -2j,  3j, 4e1j\n")
+
+                res = np.fromfile(path, dtype=ctype, sep=",")
+            assert_equal(res, np.array([1.j, -2.j, 3.j, 40.j]))
+
+            # Both components specified
+            with temppath() as path:
+                with open(path, 'wt') as f:
+                    f.write("1+1j,2-2j, -3+3j,  -4e1+4j\n")
+
+                res = np.fromfile(path, dtype=ctype, sep=",")
+            assert_equal(res, np.array([1. + 1.j, 2. - 2.j, - 3. + 3.j, - 40. + 4j]))
+
+            # Spaces at wrong places
+            with temppath() as path:
+                with open(path, 'wt') as f:
+                    f.write("1+2 j,3\n")
+
+                with assert_warns(DeprecationWarning):
+                    res = np.fromfile(path, dtype=ctype, sep=",")
+            assert_equal(res, np.array([1.]))
+
+            # Spaces at wrong places
+            with temppath() as path:
+                with open(path, 'wt') as f:
+                    f.write("1+ 2j,3\n")
+
+                with assert_warns(DeprecationWarning):
+                    res = np.fromfile(path, dtype=ctype, sep=",")
+            assert_equal(res, np.array([1.]))
+
+            # Spaces at wrong places
+            with temppath() as path:
+                with open(path, 'wt') as f:
+                    f.write("1 +2j,3\n")
+
+                with assert_warns(DeprecationWarning):
+                    res = np.fromfile(path, dtype=ctype, sep=",")
+            assert_equal(res, np.array([1.]))
+
+            # Spaces at wrong places
+            with temppath() as path:
+                with open(path, 'wt') as f:
+                    f.write("1+j\n")
+
+                with assert_warns(DeprecationWarning):
+                    res = np.fromfile(path, dtype=ctype, sep=",")
+            assert_equal(res, np.array([1.]))
+
+            # Spaces at wrong places
+            with temppath() as path:
+                with open(path, 'wt') as f:
+                    f.write("1+\n")
+
+                with assert_warns(DeprecationWarning):
+                    res = np.fromfile(path, dtype=ctype, sep=",")
+            assert_equal(res, np.array([1.]))
+
+            # Spaces at wrong places
+            with temppath() as path:
+                with open(path, 'wt') as f:
+                    f.write("1j+1\n")
+
+                with assert_warns(DeprecationWarning):
+                    res = np.fromfile(path, dtype=ctype, sep=",")
+            assert_equal(res, np.array([1.j]))
+
+
 
     @pytest.mark.skipif(string_to_longdouble_inaccurate,
                         reason="Need strtold_l")
